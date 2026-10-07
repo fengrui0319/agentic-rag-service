@@ -3,3 +3,7 @@ fastapi
 uvicorn
 python-dotenv
 sentence-transformers
+numpy
+pydantic
+httpx
+pytest
