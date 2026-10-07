@@ -319,3 +319,36 @@ def test_chat_rejects_message_that_is_too_long():
     )
 
     assert response.status_code == 422
+
+def test_chat_stream_handles_runtime_error(monkeypatch):
+    def fake_stream_agent_with_history(
+        prompt: str,
+        history=None,
+    ):
+        yield "partial response"
+
+        raise RuntimeError(
+            "Agent exceeded maximum steps."
+        )
+
+    monkeypatch.setattr(
+        api,
+        "stream_agent_with_history",
+        fake_stream_agent_with_history,
+    )
+
+    response = client.post(
+        "/chat/stream",
+        json={
+            "message": "cause stream failure",
+        },
+    )
+
+    assert response.status_code == 200
+
+    assert response.text == (
+        "partial response"
+        "\n[stream error: agent could not complete the request]"
+    )
+
+    assert api.SESSIONS == {}

@@ -5,13 +5,13 @@ EMBED_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 
 MIN_SIMILARITY = 0.35
 
+DEFAULT_CHUNK_SIZE = 200
+DEFAULT_CHUNK_OVERLAP = 50
+
 _EMBED_MODEL = None
 _DOCUMENTS = None
 _CHUNKS = None
 _CHUNK_EMBEDDINGS = None
-
-def load_document(path: str | Path) -> str:
-    return Path(path).read_text(encoding="utf-8")
 
 def load_documents(directory: Path) -> list[dict[str, str]]:
     documents = []
@@ -26,8 +26,8 @@ def load_documents(directory: Path) -> list[dict[str, str]]:
 
 def chunk_text(
     text: str,
-    chunk_size: int = 500,
-    overlap: int = 80,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    overlap: int = DEFAULT_CHUNK_OVERLAP,
 ) -> list[str]:
     sections = []
     current_section = []
@@ -66,8 +66,8 @@ def chunk_text(
 
 def chunk_documents(
     documents: list[dict[str, str]],
-    chunk_size: int = 200,
-    overlap: int = 50,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    overlap: int = DEFAULT_CHUNK_OVERLAP,
 ) -> list[dict[str, str]]:
     chunks = []
 
@@ -152,9 +152,6 @@ def build_context(results: list[dict]) -> str:
         )
 
     return "\n\n".join(context_parts)
-
-BASE_DIR = Path(__file__).resolve().parent
-KNOWLEDGE_PATH = BASE_DIR / "knowledge" / "project.md"
 
 BASE_DIR = Path(__file__).resolve().parent
 KNOWLEDGE_DIR = BASE_DIR / "knowledge"

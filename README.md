@@ -76,6 +76,83 @@ The embedding model and knowledge index are initialized lazily, so functionality
 
 The current implementation performs retrieval in memory and does not require a vector database.
 
+## Design Decisions
+
+### Why AST instead of `eval()`?
+
+The calculator accepts model-generated expressions, so executing them directly
+with Python `eval()` would unnecessarily expose Python execution semantics.
+
+The calculator instead parses expressions with `ast` and explicitly allows only
+supported numeric constants and arithmetic operators. Expression length,
+numeric magnitude, and exponent size are also bounded.
+
+### Why a local Sentence Transformer?
+
+The current knowledge base is small and local, so retrieval does not require
+an external embedding API or a vector database.
+
+`paraphrase-multilingual-MiniLM-L12-v2` provides lightweight local inference
+and multilingual semantic embeddings suitable for the current project scope.
+
+### Why use a relevance threshold?
+
+Top-k retrieval always returns the nearest chunks even when none of them are
+actually relevant.
+
+A minimum similarity threshold allows the retriever to return no context for
+out-of-domain questions instead of forcing unrelated documents into the agent
+context.
+
+The current threshold (`0.35`) works for the included small evaluation set and
+should be recalibrated if the corpus or embedding model changes.
+
+### Why use Markdown-aware overlapping chunks?
+
+The current implementation uses a 200-character chunk size with a 50-character
+overlap.
+
+Markdown structure is preserved when possible, and fixed-size overlapping
+windows are only used when a section exceeds the configured chunk size.
+
+The current chunk size and overlap are practical defaults for this small corpus,
+not globally optimized values.
+
+### Why use both `max_steps` and `max_tokens`?
+
+They protect against different failure modes.
+
+`max_steps` limits how many agent/tool-call iterations can occur, preventing
+unbounded tool loops.
+
+`max_tokens` limits the size of a single model response, helping control
+latency and API cost.
+
+Using both provides separate safeguards for agent control flow and model output
+size.
+
+### Why lazy-load the embedding model?
+
+The embedding model is only required when the RAG tool is actually used.
+
+Lazy initialization prevents calculator-only or lightweight API paths from
+paying the startup cost of loading the Sentence Transformer model and building
+the knowledge index.
+
+The initialized model and index are then reused within the same process.
+
+### Why keep sessions and retrieval in memory?
+
+The current project uses a small local knowledge base and is designed as a
+lightweight single-process service.
+
+For this scope, in-memory session history and retrieval avoid adding Redis,
+a database, or a vector store before they are necessary.
+
+This keeps the implementation easy to inspect and run locally. For a larger
+or multi-instance deployment, persistent session storage and a persistent
+retrieval index would be natural next steps.
+
 ## API
 
 ### `GET /health`
@@ -140,7 +217,7 @@ python -m pytest -v
 Current test status:
 
 ```text
-26 passed
+27 passed
 ```
 
 Tests use mocks where appropriate so normal unit tests do not require real LLM API calls or loading the embedding model.
@@ -171,11 +248,7 @@ Start the FastAPI service:
 python -m uvicorn api:app --reload
 ```
 
-Then open:
-
-```text
-http://127.0.0.1:8000/docs
-```
+Then open `http://127.0.0.1:8000/docs` to use the automatically generated Swagger UI.
 
 to use the automatically generated Swagger UI.
 

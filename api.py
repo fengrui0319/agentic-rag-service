@@ -68,12 +68,21 @@ def chat_stream(req: ChatRequest):
     def generate():
         chunks = []
 
-        for text in stream_agent_with_history(
-            req.message,
-            history,
-        ):
-            chunks.append(text)
-            yield text
+        try:
+            for text in stream_agent_with_history(
+                    req.message,
+                    history,
+            ):
+                chunks.append(text)
+                yield text
+
+        except RuntimeError:
+            yield "\n[stream error: agent could not complete the request]"
+            return
+
+        except Exception:
+            yield "\n[stream error: internal agent error]"
+            return
 
         answer = "".join(chunks)
 
