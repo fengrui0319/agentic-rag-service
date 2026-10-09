@@ -1,285 +1,198 @@
 # Agentic RAG Service
 
-A lightweight Python service that combines an LLM agent, tool calling, retrieval-augmented generation (RAG), multi-turn sessions, and streaming responses behind a FastAPI API.
+**A local-first LLM Agent system combining tool orchestration, persistent conversations, retrieval-augmented generation, and a streaming HTTP interface.**
 
-The project uses DeepSeek through an Anthropic-compatible API and a local Sentence Transformer model for document retrieval.
+`Python` · `FastAPI` · `DeepSeek API` · `MCP` · `Skills` · `Subagents` · `Sentence Transformers` · `pytest`
 
-## Features
+The project brings together a coding-oriented Agent runtime and a document-grounded question-answering service. It uses a **shared Agent execution core** for both the terminal interface and FastAPI, with different tool-access policies for each entry point.
 
-- Tool-using agent loop with configurable step and token limits
-- Safe calculator tool using AST-based expression evaluation
-- Multi-document RAG over local Markdown files
-- Markdown-aware chunking with overlapping chunks
-- Source metadata for retrieved context
-- Cosine-similarity retrieval with a relevance threshold
-- Multi-turn conversations with session history
-- Bounded conversation history
-- Streaming responses
-- Lazy loading of the embedding model and knowledge index
-- Tool-level and API-level error handling
-- Input length validation
-- Offline retrieval evaluation
-- Automated regression tests with pytest
+## Engineering Highlights
 
-## Architecture
+- **Unified Agent execution:** Multi-turn tool-use loop, streamed text and reasoning-block handling, explicit stop-reason processing, bounded retries, and structured failure propagation.
+- **Extensible tool ecosystem:** Local filesystem/search/shell tools, stdio-based **MCP** tool discovery and dispatch, on-demand **Skills** loading, and a read-only **Subagent** with separate conversation context.
+- **Persistent conversation state:** Append-only **JSONL** event log, session resume and replay, context compaction snapshots, and request-level rollback for handled HTTP failures.
+- **HTTP integration and execution boundaries:** FastAPI `/chat` and `/chat/stream` share `agent_turn()`. HTTP requests expose only the `retrieve_knowledge` tool, with per-session serialization and a bounded model-turn budget.
+- **Retrieval pipeline with measurable baseline:** Markdown-aware chunking, local embeddings, cosine-similarity retrieval, source attribution, out-of-domain thresholding, and reproducible offline evaluation.
+
+**Verification:** The Windows regression suite completed **41/41 tests in 8.17 seconds** after a Session path-compatibility fix. Separately, the CLI RAG workflow and both HTTP chat endpoints were exercised using real DeepSeek requests.
+
+## System Architecture
 
 ```text
-User
-  |
-  v
-FastAPI
-  |
-  +---- POST /chat
-  |
-  +---- POST /chat/stream
-  |
-  v
-Agent Loop
-  |
-  +---- calculator
-  |
-  +---- retrieve_knowledge
-           |
-           v
-     Local Markdown Documents
-           |
-           v
-     Markdown-aware Chunking
-           |
-           v
-     Sentence Transformer
-           |
-           v
-     Cosine Similarity Search
+                  +--------------------------------------+
+                  |           Agent Runtime              |
+                  |    tool loop / streaming / retries   |
+                  |     permissions / stop handling      |
+                  +------------------+-------------------+
+                                     |
+              +----------------------+----------------------+
+              |                                             |
+       CLI: agent.py                                   FastAPI: api.py
+       interactive / one-shot                         GET  /health
+              |                                       POST /chat
+              |                                       POST /chat/stream
+     +--------+-------------------+                        |
+     |        |        |          |               retrieve_knowledge only
+  Local     MCP      Skills    Task /                      |
+  tools    servers  on-demand  Subagent                rag.py
+     |        |        |          |                        |
+     +--------+--------+----------+             Markdown chunks + local
+              |                                    embeddings / Top-K
+         JSONL sessions                                |
+         resume / compaction                       knowledge/*.md
 ```
 
-The agent decides when to call a tool. Python executes the selected tool and returns the tool result to the model before the agent continues.
+**One runtime, different capabilities:** The CLI can access the coding-tool ecosystem, while the HTTP interface intentionally uses a narrow retrieval-only allowlist. The service does **not** expose remote shell or file-write access through the chat endpoints.
 
-A maximum agent step count prevents unlimited tool-call loops.
+## Technical Design
 
-## RAG Pipeline
+### 1. Agent Runtime and Tool Routing
 
-Knowledge documents are stored in the `knowledge/` directory.
+The core `agent_turn()` handles the model's response cycle: submit messages and tool schemas, process streamed blocks, route tool calls, append tool results, and terminate according to explicit stop reasons. A configurable upper bound prevents indefinitely continuing the model-tool loop.
 
-At retrieval time, the service:
+Tools are dispatched through a local registry or the MCP namespace. The CLI prompts for approval before `Write`, `Edit`, or `Bash` by default. The HTTP adapter applies a separate `retrieve_knowledge`-only allowlist.
 
-1. loads all Markdown documents,
-2. splits documents into Markdown-aware chunks,
-3. preserves source metadata for every chunk,
-4. embeds chunks using `paraphrase-multilingual-MiniLM-L12-v2`,
-5. embeds the user query using the same model,
-6. ranks chunks with cosine similarity,
-7. removes results below a relevance threshold,
-8. returns relevant context and its source to the agent.
+### 2. MCP, Skills, and Subagent
 
-The embedding model and knowledge index are initialized lazily, so functionality that does not require RAG does not pay the model-loading cost.
+- **MCP:** Initializes included stdio servers, discovers their tool schemas, and routes calls through namespaced tools. Included servers demonstrate calculator and example-weather integrations; the weather server uses fixed sample data, not live forecasts.
+- **Skills:** Builds a lightweight catalog of Skill descriptions and loads full instructions on demand via `read_skill`, avoiding the need to inject every Skill body into the initial context.
+- **Subagent:** `Task` delegates bounded, read-only investigation to a child Agent with its own message history and a restricted tool set (`Read`, `Glob`, `Grep`, `read_skill`). Child usage is incorporated into the local cost meter.
 
-The current implementation performs retrieval in memory and does not require a vector database.
+### 3. Session Persistence and Recovery
 
-## Design Decisions
+`Session` writes conversation events to an append-only JSONL log. Replaying these events reconstructs the working message history on resume. Compaction writes a replacement message snapshot that can be replayed after reopening the session.
 
-### Why AST instead of `eval()`?
+For HTTP requests, a per-session lock serializes calls inside a single process. On a handled failure, the API writes a snapshot of the pre-request message state. Session identifiers are validated, and Session-directory naming handles Windows paths.
 
-The calculator accepts model-generated expressions, so executing them directly
-with Python `eval()` would unnecessarily expose Python execution semantics.
+This provides recoverable application state for the tested flows; it is **not** a transactional database or a cross-process concurrency mechanism.
 
-The calculator instead parses expressions with `ast` and explicitly allows only
-supported numeric constants and arithmetic operators. Expression length,
-numeric magnitude, and exponent size are also bounded.
+### 4. Retrieval-Augmented HTTP Service
 
-### Why a local Sentence Transformer?
+The current retrieval path loads Markdown documents from `knowledge/`, splits sections using heading-aware chunking and overlapping windows, embeds passages using `paraphrase-multilingual-MiniLM-L12-v2`, and ranks by cosine similarity. Results include source-document labels and are filtered by a minimum similarity threshold.
 
-The current knowledge base is small and local, so retrieval does not require
-an external embedding API or a vector database.
+Both HTTP chat endpoints run against the same Agent core:
 
-`paraphrase-multilingual-MiniLM-L12-v2` provides lightweight local inference
-and multilingual semantic embeddings suitable for the current project scope.
+| Endpoint | Response | Notes |
+|---|---|---|
+| `GET /health` | JSON health response | Service liveness |
+| `POST /chat` | JSON `session_id` and `answer` | Non-streaming HTTP response |
+| `POST /chat/stream` | Incremental `text/plain` | Session ID in `X-Session-ID`; may include text before tool calls |
 
-### Why use a relevance threshold?
+Both POST routes accept a `message` and an optional `session_id`. The HTTP Agent is limited to **6 model turns** per request.
 
-Top-k retrieval always returns the nearest chunks even when none of them are
-actually relevant.
+## Verification and Evaluation
 
-A minimum similarity threshold allows the retriever to return no context for
-out-of-domain questions instead of forcing unrelated documents into the agent
-context.
+### Regression Tests
 
-The current threshold (`0.35`) works for the included small evaluation set and
-should be recalibrated if the corpus or embedding model changes.
-
-### Why use Markdown-aware overlapping chunks?
-
-The current implementation uses a 200-character chunk size with a 50-character
-overlap.
-
-Markdown structure is preserved when possible, and fixed-size overlapping
-windows are only used when a section exceeds the configured chunk size.
-
-The current chunk size and overlap are practical defaults for this small corpus,
-not globally optimized values.
-
-### Why use both `max_steps` and `max_tokens`?
-
-They protect against different failure modes.
-
-`max_steps` limits how many agent/tool-call iterations can occur, preventing
-unbounded tool loops.
-
-`max_tokens` limits the size of a single model response, helping control
-latency and API cost.
-
-Using both provides separate safeguards for agent control flow and model output
-size.
-
-### Why lazy-load the embedding model?
-
-The embedding model is only required when the RAG tool is actually used.
-
-Lazy initialization prevents calculator-only or lightweight API paths from
-paying the startup cost of loading the Sentence Transformer model and building
-the knowledge index.
-
-The initialized model and index are then reused within the same process.
-
-### Why keep sessions and retrieval in memory?
-
-The current project uses a small local knowledge base and is designed as a
-lightweight single-process service.
-
-For this scope, in-memory session history and retrieval avoid adding Redis,
-a database, or a vector store before they are necessary.
-
-This keeps the implementation easy to inspect and run locally. For a larger
-or multi-instance deployment, persistent session storage and a persistent
-retrieval index would be natural next steps.
-
-## API
-
-### `GET /health`
-
-Checks whether the service is running.
-
-### `POST /chat`
-
-Returns a complete agent response.
-
-The request supports an optional `session_id`. If none is provided, the server creates a new session.
-
-### `POST /chat/stream`
-
-Streams the agent response incrementally.
-
-The session ID is returned in the `X-Session-ID` response header.
-
-Sessions are currently stored in memory, so restarting the server clears session history.
-
-## Retrieval Evaluation
-
-The project includes a small offline retrieval evaluation set in `eval.py`.
-
-Current results on the included 11-case evaluation set:
+On Windows, after the Session path fix:
 
 ```text
-Retrieval Hit@1:      9/9 (100.0%)
-Retrieval Hit@3:      9/9 (100.0%)
-Rejection accuracy:   2/2 (100.0%)
+41 passed in 8.17s
 ```
 
-The evaluation set contains nine in-domain retrieval questions and two irrelevant questions used to verify relevance-based rejection.
+The automated suite exercises HTTP endpoints and error responses (using mock model calls), Session replay/rollback and same-session request serialization, MCP calculator behavior, tool permissions, and core RAG utilities. The **41 tests are not 41 paid model calls**.
 
-These results describe only the included small offline evaluation set and are not intended as a general RAG accuracy benchmark.
+### V1.0 Retrieval Baseline
 
-Run the evaluation with:
+The current corpus contains **three project Markdown documents**. The offline evaluation uses nine in-domain questions and two out-of-domain questions:
 
-```bash
+| Metric | Result |
+|---|---:|
+| Source Hit@1 | **4/9 (44.4%)** |
+| Source Hit@3 | **7/9 (77.8%)** |
+| Out-of-domain rejection | **2/2 (100.0%)** |
+
+These results describe a **small, source-document retrieval benchmark**, not general answer accuracy. They provide a reproducible starting point for the planned code-retrieval evaluation; the tiny sample should not be read as production-level evidence.
+
+```powershell
+python -m pytest -v
 python eval.py
 ```
 
-## Tests
+## Getting Started
 
-The project includes automated tests for:
+### Requirements and Configuration
 
-- FastAPI endpoints and session behavior
-- streaming session behavior
-- calculator correctness and safety checks
-- conversation history trimming
-- RAG chunking and source metadata
-- retrieval threshold behavior
-- tool execution and error handling
-- request length validation
-
-Run all tests with:
-
-```bash
-python -m pytest -v
+```powershell
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-Current test status:
+Set your own key in the local `.env` file; never commit it.
 
-```text
-27 passed
+```dotenv
+DEEPSEEK_API_KEY=your_api_key_here
+DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic
+DEEPSEEK_MODEL=deepseek-flash
+DEEPSEEK_PRICE_TIER=peak
 ```
 
-Tests use mocks where appropriate so normal unit tests do not require real LLM API calls or loading the embedding model.
+The runtime uses DeepSeek via its Anthropic-compatible interface. **Real model calls consume billed API tokens**. The local Sentence Transformer may download model weights on first use, but embeddings do not call the DeepSeek API. Usage and CNY cost displayed in the CLI are estimates.
 
-## Setup
+### CLI
 
-Create and activate a Python environment, then install dependencies:
-
-```bash
-pip install -r requirements.txt
+```powershell
+python agent.py --help
+python agent.py "Explain the available tools."
+python agent.py
 ```
 
-Copy the example environment configuration:
+### HTTP Service
 
-```bash
-copy .env.example .env
+Start the local API from the project root:
+
+```powershell
+python -m uvicorn api:app --host 127.0.0.1 --port 8000
 ```
 
-Fill in the required model/API configuration in `.env`.
+Interactive API documentation is available at `http://127.0.0.1:8000/docs`.
 
-The real `.env` file is intentionally excluded from Git.
+Example request from a second PowerShell terminal:
 
-## Run
+```powershell
+$body = @{
+    message = "Use retrieve_knowledge to explain GET /health. Cite the source document."
+} | ConvertTo-Json
 
-Start the FastAPI service:
-
-```bash
-python -m uvicorn api:app --reload
+Invoke-RestMethod `
+    -Uri "http://127.0.0.1:8000/chat" `
+    -Method Post `
+    -ContentType "application/json" `
+    -Body $body
 ```
 
-Then open `http://127.0.0.1:8000/docs` to use the automatically generated Swagger UI.
+`/chat/stream` returns incremental plain text, not SSE. Knowledge-document edits require an API restart to rebuild the process-local retrieval index.
 
-to use the automatically generated Swagger UI.
+## Repository Guide
 
-## Project Structure
+| Path | Responsibility |
+|---|---|
+| `agent.py` | Agent loop, CLI, tool dispatch, Session management |
+| `api.py` | FastAPI adapter, request limits, Session locking, streaming |
+| `rag.py` | Local Markdown retrieval baseline |
+| `mcp_client.py`, `mcp_servers/` | MCP integration and included tool servers |
+| `skills.py`, `skills/` | Skills catalog and on-demand loading |
+| `subagent.py` | Read-only child-Agent execution |
+| `knowledge/` | Project documentation used by the current RAG pipeline |
+| `tests/`, `eval.py` | Regression tests and offline retrieval evaluation |
 
-```text
-agentic-rag-service/
-├── knowledge/
-│   ├── api.md
-│   ├── architecture.md
-│   └── project.md
-├── tests/
-│   ├── test_api.py
-│   ├── test_calculator.py
-│   ├── test_history.py
-│   ├── test_rag.py
-│   └── test_tools.py
-├── api.py
-├── eval.py
-├── mini_agent.py
-├── rag.py
-├── requirements.txt
-├── .env.example
-├── .gitignore
-└── README.md
-```
+## Development Roadmap
 
-## Current Limitations
+The project is being evolved incrementally, with measurements attached to features **after implementation**.
 
-Sessions and the retrieval index are stored in memory.
+- **Next — Code-aware RAG:** Index actual Python source and technical documentation; introduce AST-aware chunking, symbol/file/line metadata, BM25 + dense hybrid retrieval, reciprocal-rank fusion, reranker comparisons, and manually verified retrieval cases.
+- **Further Agent engineering:** Explore multi-hop code evidence collection, MCP tool-description lazy loading, stricter execution boundaries, and latency/cost benchmarking where justified by test results.
 
-The current knowledge base is intentionally small and local.
+These are planned directions; they are **not included in the current measured baseline**.
 
-The project does not currently use a persistent vector database, distributed session storage, subagents, or a production deployment layer.
+## Security and Scope
+
+This is a **local development service**, not an authenticated multi-user deployment. The HTTP interface deliberately restricts tool access, but session IDs are not identity credentials. Locking applies within one process only; stream cancellation is best-effort, and errors after streaming starts may appear in the text body even when HTTP status is 200. CLI approval prompts are not a filesystem or process sandbox.
+
+Session logs are stored on disk and should remain outside version control. The retrieval index is currently process-local and dense-only; code-level citations and hybrid retrieval belong to the next development stage.
+
+## References and Acknowledgements
+
+The Agent runtime was developed through studying and adapting implementation patterns and selected foundational components from [agent-zero-to-hero](https://github.com/KeWang0622/agent-zero-to-hero), alongside additional integration work in this repository. The current service combines the DeepSeek-backed Agent runtime with local RAG, FastAPI endpoints, session handling, integration tests, and project-specific fixes.
+
+For reused upstream code, retain the applicable upstream license and copyright notice.

@@ -1,40 +1,42 @@
+"""Offline end-to-end test of the CURRENT local MCP calculator server.
+
+Unlike the old mini_agent calculator, this is a real stdio MCP client/server
+interaction. It uses no LLM API; the server must be present in mcp_servers/.
+"""
+from pathlib import Path
+import sys
+
 import pytest
 
-from mini_agent import calculator
+from mcp_client import MCPClient
 
 
-def test_basic_multiplication():
-    assert calculator("12345 * 6789") == "83810205"
+@pytest.fixture(scope="module")
+def calculator_client():
+    project_root = Path(__file__).resolve().parents[1]
+    script = project_root / "mcp_servers" / "calculator_server.py"
+    assert script.is_file(), f"Missing current MCP calculator server: {script}"
+    client = MCPClient("calc", [sys.executable, str(script)])
+    client.initialize()
+    try:
+        assert "calculator" in [tool["name"] for tool in client.tools]
+        yield client
+    finally:
+        client.close()
 
 
-def test_parentheses_and_precedence():
-    assert calculator("(10 + 2) * 3 - 5") == "31"
+@pytest.mark.parametrize("expression,expected", [
+    ("2+3*4", "14"),
+    ("(10+2)*3-5", "31"),
+    ("17*23+1234", "1625"),
+    ("-15+7", "-8"),
+])
+def test_calculator_arithmetic(calculator_client, expression, expected):
+    result = str(calculator_client.call_tool("calculator", {"expression": expression})).strip()
+    assert result == expected
 
 
-def test_division():
-    assert calculator("100 / 4") == "25.0"
-
-
-def test_negative_number():
-    assert calculator("-15 + 7") == "-8"
-
-
-def test_function_call_is_rejected():
-    with pytest.raises(
-        ValueError,
-        match="Unsupported expression: Call",
-    ):
-        calculator("open(1)")
-
-
-def test_variable_is_rejected():
-    with pytest.raises(ValueError):
-        calculator("x + 1")
-
-
-def test_large_exponent_is_rejected():
-    with pytest.raises(
-        ValueError,
-        match="Exponent is too large",
-    ):
-        calculator("2 ** 100")
+@pytest.mark.parametrize("expression", ["open(1)", "abs(1)", "x+1"])
+def test_calculator_rejects_python_expressions(calculator_client, expression):
+    result = str(calculator_client.call_tool("calculator", {"expression": expression}))
+    assert result.startswith("ERROR:"), result
